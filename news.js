@@ -131,16 +131,8 @@
     };
   }
 
-  async function readBriefing(yesterday) {
-    const response = await fetch("./news.json?v=" + Date.now(), {
-      method: "GET",
-      cache: "no-store",
-      credentials: "same-origin",
-      headers: { Accept: "application/json" }
-    });
-    if (!response.ok) throw new Error("전날 기사 자료를 불러오지 못했습니다.");
-    const payload = await response.json();
-    if (payload.target_date_kst !== yesterday) {
+  function normalizeBriefing(payload, yesterday) {
+    if (payload?.target_date_kst !== yesterday) {
       throw new Error("전날 기사 자료가 아직 갱신되지 않았습니다.");
     }
     const result = {};
@@ -160,6 +152,42 @@
         .slice(0, 4);
     }
     return { topics: result, generatedAt: payload.generated_at };
+  }
+
+  function readCachedBriefing(yesterday) {
+    try {
+      const cached = sessionStorage.getItem("morning-context-briefing:" + yesterday);
+      return cached ? normalizeBriefing(JSON.parse(cached), yesterday) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function readBriefing(yesterday) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 12000);
+    let payload;
+    try {
+      const response = await fetch("./news.json?v=" + Date.now(), {
+        method: "GET",
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+        signal: controller.signal
+      });
+      if (!response.ok) throw new Error("전날 기사 자료를 불러오지 못했습니다.");
+      payload = await response.json();
+    } finally {
+      window.clearTimeout(timeout);
+    }
+
+    const briefing = normalizeBriefing(payload, yesterday);
+    try {
+      sessionStorage.setItem("morning-context-briefing:" + yesterday, JSON.stringify(payload));
+    } catch {
+      // Storage can be unavailable in private browsing; live fetching still works.
+    }
+    return briefing;
   }
 
   function makeCard(item) {
@@ -238,19 +266,48 @@
     if (result) result.textContent = "전날 이슈 " + total + "건";
     const noResults = document.getElementById("noResults");
     if (noResults) noResults.style.display = total ? "none" : "block";
+    document.dispatchEvent(new Event("briefing:updated"));
     return total;
   }
 
-  async function refreshNews() {
+  let refreshInProgress = false;
+  let refreshPending = false;
+  let lastRefreshStartedAt = 0;
+  let automaticRetryCount = 0;
+  let retryTimer = null;
+  let returnRefreshTimer = null;
+
+  async function refreshNews({ force = false } = {}) {
+    if (refreshInProgress) {
+      if (force) refreshPending = true;
+      return;
+    }
+    const startedAt = Date.now();
+    if (!force && startedAt - lastRefreshStartedAt < 1200) return;
+    lastRefreshStartedAt = startedAt;
+    refreshInProgress = true;
+
     const yesterday = updateDateLabels();
+    const cached = readCachedBriefing(yesterday);
+    const cachedTotal = cached
+      ? renderAll(cached.topics, yesterday, cached.generatedAt, false)
+      : 0;
+
     refreshButton.disabled = true;
     refreshButton.textContent = "불러오는 중…";
-    for (const topic of TOPICS) renderTopic(topic, [], true);
-    setStatus(formatDate(dateFromKey(yesterday), { year: "numeric", month: "long", day: "numeric" }) +
-      " (KST) 전날 기사 자료를 확인하고 있습니다…", "loading");
+    if (!cached) {
+      for (const topic of TOPICS) renderTopic(topic, [], true);
+      setStatus(formatDate(dateFromKey(yesterday), { year: "numeric", month: "long", day: "numeric" }) +
+        " (KST) 전날 기사 자료를 확인하고 있습니다…", "loading");
+    } else {
+      setStatus("저장된 전날 기사 " + cachedTotal + "건을 표시하며 최신 자료를 확인하고 있습니다…", "loading");
+    }
 
     try {
       const briefing = await readBriefing(yesterday);
+      automaticRetryCount = 0;
+      if (retryTimer) window.clearTimeout(retryTimer);
+      retryTimer = null;
       const total = renderAll(briefing.topics, yesterday, briefing.generatedAt, false);
       const fewer = TOPICS.filter((topic) => (briefing.topics[topic.id] || []).length < 4).map((topic) => topic.label);
       if (fewer.length) {
@@ -262,14 +319,67 @@
           " (KST) 기사 " + total + "건 · 자동 갱신 " +
           (briefing.generatedAt ? formatDate(new Date(briefing.generatedAt), { hour: "2-digit", minute: "2-digit" }) + " (KST)" : "완료"), "ready");
       }
-    } catch (error) {
-      renderAll({}, yesterday, null, false);
-      setStatus(error.message + " 전날이 아닌 기사는 대신 표시하지 않습니다. 잠시 후 다시 시도해 주세요.", "error");
+    } catch {
+      if (cached) {
+        renderAll(cached.topics, yesterday, cached.generatedAt, false);
+      } else {
+        renderAll({}, yesterday, null, false);
+      }
+
+      if (!document.hidden && automaticRetryCount < 2) {
+        automaticRetryCount += 1;
+        const attempt = automaticRetryCount;
+        setStatus(cached
+          ? "연결이 잠시 끊겼습니다. 저장된 전날 기사 " + cachedTotal + "건을 표시하며 자동으로 다시 시도합니다…"
+          : "뉴스 연결이 잠시 끊겼습니다. 자동으로 다시 시도합니다…", "loading");
+        retryTimer = window.setTimeout(() => {
+          retryTimer = null;
+          refreshNews({ force: true });
+        }, attempt * 1000);
+      } else {
+        setStatus(cached
+          ? "저장된 전날 기사 " + cachedTotal + "건을 표시 중입니다. 지금 새로고침으로 다시 확인할 수 있습니다."
+          : "뉴스 자료를 불러오지 못했습니다. 전날이 아닌 기사는 표시하지 않습니다. 지금 새로고침으로 다시 시도해 주세요.", "error");
+      }
+    } finally {
+      refreshButton.disabled = false;
+      refreshButton.textContent = "지금 새로고침";
+      refreshInProgress = false;
+      if (refreshPending) {
+        refreshPending = false;
+        window.setTimeout(() => refreshNews({ force: true }), 0);
+      }
     }
-    refreshButton.disabled = false;
-    refreshButton.textContent = "지금 새로고침";
   }
 
-  refreshButton.addEventListener("click", refreshNews);
+  function refreshAfterReturn() {
+    automaticRetryCount = 0;
+    if (retryTimer) window.clearTimeout(retryTimer);
+    retryTimer = null;
+    if (returnRefreshTimer) window.clearTimeout(returnRefreshTimer);
+    returnRefreshTimer = window.setTimeout(() => {
+      returnRefreshTimer = null;
+      refreshNews({ force: true });
+    }, 120);
+  }
+
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) refreshAfterReturn();
+  });
+
+  let pageWasHidden = document.hidden;
+  document.addEventListener("visibilitychange", () => {
+    const isHidden = document.hidden;
+    if (pageWasHidden && !isHidden) refreshAfterReturn();
+    pageWasHidden = isHidden;
+  });
+
+  refreshButton.addEventListener("click", () => {
+    automaticRetryCount = 0;
+    if (retryTimer) window.clearTimeout(retryTimer);
+    retryTimer = null;
+    refreshNews({ force: true });
+  });
   refreshNews();
 })();
+
