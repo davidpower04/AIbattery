@@ -1,10 +1,9 @@
 (() => {
-  const PROXY = "https://proxy.cors.dev/";
   const TOPICS = [
-    { id: "battery", label: "이차전지", query: "(이차전지 OR 배터리 OR ESS OR 전기차 배터리)" },
-    { id: "chip", label: "반도체", query: "(반도체 OR HBM OR 삼성전자 OR SK하이닉스)" },
-    { id: "fx", label: "환율", query: "(환율 OR 원달러 OR 원화 OR 달러 환율)" },
-    { id: "market", label: "주식시장", query: "(코스피 OR 코스닥 OR 증시 OR 주식시장)" }
+    { id: "battery", label: "이차전지" },
+    { id: "chip", label: "반도체" },
+    { id: "fx", label: "환율" },
+    { id: "market", label: "주식시장" }
   ];
 
   const style = document.createElement("style");
@@ -60,7 +59,7 @@
   }
   const footer = document.querySelector(".foot p");
   if (footer) {
-    footer.innerHTML = "<b>아침의 맥락</b> · 방문할 때마다 한국시간 전날의 기사를 다시 확인합니다.<br>자동 수집: Google 뉴스 RSS 한국어 검색 결과. 오래된 기사는 전날 기사 목록에 섞지 않습니다.<br>투자 권유가 아닌 정보 요약입니다. 사건 시각과 내용은 원문에서 확인하세요.";
+    footer.innerHTML = "<b>아침의 맥락</b> · 방문할 때마다 한국시간 전날의 기사 자료를 확인합니다.<br>자동 수집: Google 뉴스 RSS 한국어 검색 결과. 전날이 아닌 기사는 목록에 넣지 않습니다.<br>투자 권유가 아닌 정보 요약입니다. 사건 시각과 내용은 원문에서 확인하세요.";
   }
 
   const formatDate = (date, options) => new Intl.DateTimeFormat("ko-KR", {
@@ -101,91 +100,66 @@
       "자료 기준 · " + formatDate(dateFromKey(yesterday), { year: "numeric", month: "long", day: "numeric" }) + " (KST)";
     document.getElementById("coverageWindow").textContent =
       formatDate(dateFromKey(yesterday), { month: "long", day: "numeric" });
-    return { today, yesterday };
+    return yesterday;
   }
 
-  function setStatus(message, state) {
+  const setStatus = (message, state) => {
     status.textContent = message;
     status.dataset.state = state || "ready";
-  }
+  };
 
-  function safeLink(value) {
+  function normalizeItem(item, yesterday) {
+    if (!item || !item.title || !item.source || !item.link ||
+        !/[가-힣]/.test(item.title) || !/[가-힣]/.test(item.source)) return null;
+    const published = new Date(item.published);
+    if (Number.isNaN(published.valueOf()) || kstDateKey(published) !== yesterday) return null;
+    let link;
     try {
-      const url = new URL(value);
-      return url.protocol === "https:" || url.protocol === "http:" ? url.href : "";
+      link = new URL(item.link);
+      if (link.protocol !== "https:" && link.protocol !== "http:") return null;
     } catch {
-      return "";
+      return null;
     }
+    const summary = String(item.summary || "기사 제목을 눌러 매체 원문에서 자세한 내용을 확인하세요.")
+      .replace(/\s+/g, " ").trim();
+    return {
+      title: String(item.title).trim(),
+      source: String(item.source).trim(),
+      published: published.toISOString(),
+      summary: summary.length > 220 ? summary.slice(0, 217) + "…" : summary,
+      link: link.href
+    };
   }
 
-  function plainText(html) {
-    const parsed = new DOMParser().parseFromString(html || "", "text/html");
-    return (parsed.body.textContent || "").replace(/\s+/g, " ").trim();
-  }
-
-  function parseFeed(xmlText) {
-    const xml = new DOMParser().parseFromString(xmlText, "application/xml");
-    if (xml.querySelector("parsererror")) throw new Error("RSS 형식 오류");
-    return [...xml.querySelectorAll("item")].map((entry) => {
-      const text = (tag) => entry.getElementsByTagName(tag)[0]?.textContent.trim() || "";
-      return {
-        title: plainText(text("title")),
-        link: safeLink(text("link")),
-        date: text("pubDate"),
-        summary: plainText(text("description")),
-        source: plainText(text("source"))
-      };
+  async function readBriefing(yesterday) {
+    const response = await fetch("./news.json?v=" + Date.now(), {
+      method: "GET",
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" }
     });
-  }
-
-  async function fetchFeed(topic) {
-    const params = new URLSearchParams({
-      q: topic.query + " when:7d",
-      hl: "ko",
-      gl: "KR",
-      ceid: "KR:ko"
-    });
-    const rssUrl = "https://news.google.com/rss/search?" + params.toString();
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
-    try {
-      const response = await fetch(PROXY + rssUrl, {
-        method: "GET",
-        credentials: "omit",
-        cache: "no-store",
-        headers: { Accept: "application/rss+xml, application/xml, text/xml" },
-        signal: controller.signal
-      });
-      if (!response.ok) throw new Error("뉴스 피드 연결 실패");
-      return parseFeed(await response.text());
-    } finally {
-      clearTimeout(timer);
+    if (!response.ok) throw new Error("전날 기사 자료를 불러오지 못했습니다.");
+    const payload = await response.json();
+    if (payload.target_date_kst !== yesterday) {
+      throw new Error("전날 기사 자료가 아직 갱신되지 않았습니다.");
     }
-  }
-
-  function selectYesterdayStories(items, yesterday) {
-    const seen = new Set();
-    const selected = [];
-    for (const item of items) {
-      if (!item.title || !item.link || !item.source ||
-          !/[가-힣]/.test(item.title) || !/[가-힣]/.test(item.source)) continue;
-      const published = new Date(item.date);
-      if (Number.isNaN(published.valueOf()) || kstDateKey(published) !== yesterday) continue;
-      const key = item.title.toLocaleLowerCase("ko").replace(/[^\w가-힣]/g, "");
-      if (seen.has(key)) continue;
-      item.published = published.toISOString();
-      item.summary = item.summary.replace(item.title, "").replace(/^[\s|·:：\-–—]+/, "").trim();
-      if (item.summary.length > 220) item.summary = item.summary.slice(0, 217) + "…";
-      if (!item.summary) item.summary = "기사 제목을 눌러 매체 원문에서 자세한 내용을 확인하세요.";
-      seen.add(key);
-      selected.push(item);
+    const result = {};
+    for (const topic of TOPICS) {
+      const items = Array.isArray(payload.topics?.[topic.id]) ? payload.topics[topic.id] : [];
+      const seen = new Set();
+      result[topic.id] = items
+        .map((item) => normalizeItem(item, yesterday))
+        .filter((item) => {
+          if (!item) return false;
+          const key = item.title.toLocaleLowerCase("ko").replace(/[^\w가-힣]/g, "");
+          if (!key || seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })
+        .sort((a, b) => new Date(b.published) - new Date(a.published))
+        .slice(0, 4);
     }
-    return selected.sort((a, b) => new Date(b.published) - new Date(a.published)).slice(0, 4);
-  }
-
-  async function loadTopic(topic, yesterday) {
-    const feedItems = await fetchFeed(topic);
-    return selectYesterdayStories(feedItems, yesterday);
+    return { topics: result, generatedAt: payload.generated_at };
   }
 
   function makeCard(item) {
@@ -236,7 +210,7 @@
       const empty = document.createElement("p");
       empty.className = "empty";
       empty.textContent = loading
-        ? "전날의 한국어 기사를 확인하고 있습니다…"
+        ? "전날 기사 자료를 불러오고 있습니다…"
         : "해당 날짜에 표시할 전날 기사가 없습니다.";
       rendered.push(empty);
     }
@@ -246,7 +220,7 @@
     if (badge) badge.textContent = String(items.length);
   }
 
-  function renderAll(data, yesterday, updatedAt, loading) {
+  function renderAll(data, yesterday, generatedAt, loading) {
     let total = 0;
     for (const topic of TOPICS) {
       const items = data[topic.id] || [];
@@ -255,52 +229,42 @@
     }
     document.querySelector('.filter-topic[data-filter="all"] b').textContent = String(total);
     document.getElementById("storyTotal").textContent = total + "건";
-    document.getElementById("updatedAt").textContent = updatedAt
-      ? formatDate(new Date(updatedAt), { hour: "2-digit", minute: "2-digit" })
+    document.getElementById("updatedAt").textContent = generatedAt
+      ? formatDate(new Date(generatedAt), { hour: "2-digit", minute: "2-digit" })
       : "확인 중";
     document.getElementById("briefCoverage").textContent =
       "자료 기준 · " + formatDate(dateFromKey(yesterday), { year: "numeric", month: "long", day: "numeric" }) + " (KST)";
     const result = document.getElementById("resultcount");
     if (result) result.textContent = "전날 이슈 " + total + "건";
+    const noResults = document.getElementById("noResults");
+    if (noResults) noResults.style.display = total ? "none" : "block";
+    return total;
   }
 
   async function refreshNews() {
-    const { today, yesterday } = updateDateLabels();
+    const yesterday = updateDateLabels();
     refreshButton.disabled = true;
     refreshButton.textContent = "불러오는 중…";
-    setStatus(formatDate(dateFromKey(yesterday), { year: "numeric", month: "long", day: "numeric" }) +
-      " (KST) 기사만 확인하고 있습니다…", "loading");
     for (const topic of TOPICS) renderTopic(topic, [], true);
+    setStatus(formatDate(dateFromKey(yesterday), { year: "numeric", month: "long", day: "numeric" }) +
+      " (KST) 전날 기사 자료를 확인하고 있습니다…", "loading");
 
-    const outcomes = await Promise.allSettled(TOPICS.map((topic) => loadTopic(topic, yesterday)));
-    const next = {};
-    const failures = [];
-    let total = 0;
-    outcomes.forEach((outcome, index) => {
-      const topic = TOPICS[index];
-      if (outcome.status === "fulfilled") {
-        next[topic.id] = outcome.value;
+    try {
+      const briefing = await readBriefing(yesterday);
+      const total = renderAll(briefing.topics, yesterday, briefing.generatedAt, false);
+      const fewer = TOPICS.filter((topic) => (briefing.topics[topic.id] || []).length < 4).map((topic) => topic.label);
+      if (fewer.length) {
+        setStatus(formatDate(dateFromKey(yesterday), { year: "numeric", month: "long", day: "numeric" }) +
+          " (KST) 전날 기사 " + total + "건을 표시했습니다. " + fewer.join(", ") +
+          " 주제는 4건보다 적은 전날 기사만 확인됐습니다.", "ready");
       } else {
-        failures.push(topic.label);
-        next[topic.id] = [];
+        setStatus(formatDate(dateFromKey(yesterday), { year: "numeric", month: "long", day: "numeric" }) +
+          " (KST) 기사 " + total + "건 · 자동 갱신 " +
+          (briefing.generatedAt ? formatDate(new Date(briefing.generatedAt), { hour: "2-digit", minute: "2-digit" }) + " (KST)" : "완료"), "ready");
       }
-      total += next[topic.id].length;
-    });
-
-    const updatedAt = Date.now();
-    renderAll(next, yesterday, updatedAt, false);
-    const fewer = TOPICS.filter((topic) => (next[topic.id] || []).length < 4).map((topic) => topic.label);
-    if (failures.length) {
-      setStatus("뉴스 연결에 실패한 주제: " + failures.join(", ") +
-        ". 전날이 아닌 기사는 대신 표시하지 않았습니다. 새로고침으로 다시 시도해 주세요.", "error");
-    } else if (fewer.length) {
-      setStatus(formatDate(dateFromKey(yesterday), { year: "numeric", month: "long", day: "numeric" }) +
-        " (KST) 전날 기사는 총 " + total + "건입니다. " + fewer.join(", ") +
-        " 주제는 전날 기사가 4건보다 적어 확인된 기사만 표시했습니다.", "ready");
-    } else {
-      setStatus(formatDate(dateFromKey(yesterday), { year: "numeric", month: "long", day: "numeric" }) +
-        " (KST) 기사 " + total + "건 갱신 완료 · " +
-        formatDate(new Date(updatedAt), { hour: "2-digit", minute: "2-digit" }) + " (KST)", "ready");
+    } catch (error) {
+      renderAll({}, yesterday, null, false);
+      setStatus(error.message + " 전날이 아닌 기사는 대신 표시하지 않습니다. 잠시 후 다시 시도해 주세요.", "error");
     }
     refreshButton.disabled = false;
     refreshButton.textContent = "지금 새로고침";
