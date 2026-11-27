@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 3354)
-Total output lines: 308
-
 (() => {
   const PROXY = "https://proxy.cors.dev/";
   const CACHE_KEY = "morning-context-news-v1";
@@ -36,7 +33,238 @@ Total output lines: 308
     ["자료 기준", "최근 48시간", "부족하면 최근 7일 기사로 보충"],
     ["마지막 확인", "확인 중", "페이지 방문 시 자동 갱신"]
   ];
-  const market = document.querySelector(".markets…2354 tokens truncated…led = true;
+  const market = document.querySelector(".markets");
+  market.setAttribute("aria-label", "방문 시 자동 갱신되는 브리핑 상태");
+  market.replaceChildren(...marketLabels.map((row, index) => {
+    const box = document.createElement("div");
+    box.className = "metric";
+    const label = document.createElement("label");
+    label.textContent = row[0];
+    const strong = document.createElement("strong");
+    strong.id = ["topicTotal", "storyTotal", "coverageWindow", "updatedAt"][index];
+    strong.textContent = row[1];
+    const note = document.createElement("span");
+    note.textContent = row[2];
+    box.append(label, strong, note);
+    return box;
+  }));
+
+  const datebox = document.querySelector(".datebox");
+  datebox.querySelector("small").textContent = "오늘 브리핑 · KST";
+  datebox.querySelector("strong").id = "briefDate";
+  datebox.querySelector("span").id = "briefCoverage";
+  datebox.querySelector("span").textContent = "최근 48시간 · 한국어 기사";
+
+  const kicker = document.querySelector(".kicker");
+  if (kicker) kicker.lastChild.textContent = " 최근 48시간의 산업과 시장";
+  const coverageNote = document.querySelector(".coverage-note");
+  if (coverageNote) {
+    coverageNote.textContent = "방문할 때마다 최신 한국어 기사를 불러옵니다. 최근 48시간 기사를 우선하고, 주제별 4건이 부족하면 최근 7일 이내 기사로 보충합니다.";
+  }
+  const footer = document.querySelector(".foot p");
+  if (footer) {
+    footer.innerHTML = "<b>아침의 맥락</b> · 방문할 때마다 최신 한국어 기사를 불러옵니다.<br>자동 수집: Google 뉴스 RSS 검색 결과. 목록 순서는 Google 뉴스 결과이며, 요약은 RSS 설명을 짧게 정리한 내용입니다.<br>투자 권유가 아닌 정보 요약입니다. 수치와 사건 시각은 원문에서 확인하세요.";
+  }
+
+  const formatDate = (date, options) => new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    ...options
+  }).format(date);
+  const now = new Date();
+  document.getElementById("briefDate").textContent = formatDate(now, {
+    year: "numeric", month: "long", day: "numeric"
+  });
+
+  const setStatus = (message, state) => {
+    status.textContent = message;
+    status.dataset.state = state || "ready";
+  };
+
+  function safeLink(value) {
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" || url.protocol === "http:" ? url.href : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function plainText(html) {
+    const parsed = new DOMParser().parseFromString(html || "", "text/html");
+    return (parsed.body.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function parseFeed(xmlText) {
+    const xml = new DOMParser().parseFromString(xmlText, "application/xml");
+    if (xml.querySelector("parsererror")) throw new Error("RSS 형식 오류");
+    return [...xml.querySelectorAll("item")].map((entry) => {
+      const text = (tag) => entry.getElementsByTagName(tag)[0]?.textContent.trim() || "";
+      return {
+        title: plainText(text("title")),
+        link: safeLink(text("link")),
+        date: text("pubDate"),
+        summary: plainText(text("description")),
+        source: plainText(text("source"))
+      };
+    });
+  }
+
+  async function fetchFeed(topic, period) {
+    const params = new URLSearchParams({
+      q: topic.query + " when:" + period,
+      hl: "ko",
+      gl: "KR",
+      ceid: "KR:ko"
+    });
+    const rssUrl = "https://news.google.com/rss/search?" + params.toString();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(PROXY + rssUrl, {
+        method: "GET",
+        credentials: "omit",
+        cache: "no-store",
+        headers: { Accept: "application/rss+xml, application/xml, text/xml" },
+        signal: controller.signal
+      });
+      if (!response.ok) throw new Error("뉴스 피드 연결 실패");
+      return parseFeed(await response.text());
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function selectStories(items) {
+    const seen = new Set();
+    const unique = [];
+    for (const item of items) {
+      const key = item.title.toLocaleLowerCase("ko").replace(/[^\w가-힣]/g, "");
+      if (!item.title || !item.link || !item.source || !/[가-힣]/.test(item.title) ||
+          !/[가-힣]/.test(item.source) || seen.has(key)) continue;
+      const published = new Date(item.date);
+      if (Number.isNaN(published.valueOf())) continue;
+      item.published = published.toISOString();
+      item.summary = item.summary.replace(item.title, "").replace(/^[\s|·:：\-–—]+/, "").trim();
+      if (item.summary.length > 220) item.summary = item.summary.slice(0, 217) + "…";
+      if (!item.summary) item.summary = "기사 제목을 눌러 매체 원문에서 자세한 내용을 확인하세요.";
+      seen.add(key);
+      unique.push(item);
+      if (unique.length === 4) break;
+    }
+    return unique;
+  }
+
+  async function loadTopic(topic) {
+    const recent = selectStories(await fetchFeed(topic, "2d"));
+    if (recent.length >= 4) return { items: recent, window: "48시간" };
+    const week = selectStories(await fetchFeed(topic, "7d"));
+    return { items: week, window: "7일" };
+  }
+
+  function makeCard(item, topic) {
+    const card = document.createElement("a");
+    card.className = "card";
+    card.href = item.link;
+    card.setAttribute("aria-label", item.title + " — " + item.source + " 기사 보기");
+
+    const meta = document.createElement("div");
+    meta.className = "cardmeta";
+    const label = document.createElement("span");
+    label.className = "label";
+    label.textContent = "주요 기사";
+    const time = document.createElement("time");
+    time.dateTime = item.published;
+    time.textContent = formatDate(new Date(item.published), {
+      month: "long", day: "numeric", hour: "2-digit", minute: "2-digit"
+    }) + " · 한국";
+    meta.append(label, time);
+
+    const heading = document.createElement("h3");
+    heading.textContent = item.title;
+    const summary = document.createElement("p");
+    summary.textContent = item.summary;
+
+    const foot = document.createElement("div");
+    foot.className = "cardfoot";
+    const source = document.createElement("span");
+    source.className = "source";
+    source.textContent = "기사: " + item.source;
+    const read = document.createElement("span");
+    read.className = "read";
+    read.append(document.createTextNode("원문 보기 "));
+    const arrow = document.createElement("span");
+    arrow.setAttribute("aria-hidden", "true");
+    arrow.textContent = "→";
+    read.append(arrow);
+    foot.append(source, read);
+    card.append(meta, heading, summary, foot);
+    return card;
+  }
+
+  function renderTopic(topic, items, loading) {
+    const section = document.getElementById(topic.id);
+    const cards = section.querySelector(".cards");
+    const rendered = items.map((item) => makeCard(item, topic));
+    if (!rendered.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = loading ? "최신 한국어 기사를 불러오고 있습니다…" : "현재 새 한국어 기사를 불러오지 못했습니다. 새로고침을 눌러 다시 시도해 주세요.";
+      rendered.push(empty);
+    }
+    cards.replaceChildren(...rendered);
+    section.querySelector(".count").textContent = "주요 이슈 " + items.length + "건";
+    const badge = document.querySelector('.filter-topic[data-filter="' + topic.id + '"] b');
+    if (badge) badge.textContent = String(items.length);
+  }
+
+  function renderAll(data, updatedAt) {
+    let total = 0;
+    for (const topic of TOPICS) {
+      const items = data[topic.id] || [];
+      renderTopic(topic, items);
+      total += items.length;
+    }
+    document.querySelector('.filter-topic[data-filter="all"] b').textContent = String(total);
+    document.getElementById("storyTotal").textContent = total + "건";
+    document.getElementById("updatedAt").textContent = updatedAt
+      ? formatDate(new Date(updatedAt), { hour: "2-digit", minute: "2-digit" })
+      : "확인 중";
+    document.getElementById("briefCoverage").textContent =
+      "최근 48시간 · 부족하면 7일 이내 보충";
+    const result = document.getElementById("resultcount");
+    if (result) result.textContent = "전체 이슈 " + total + "건";
+  }
+
+  function readCache() {
+    try {
+      const data = JSON.parse(localStorage.getItem(CACHE_KEY) || "null");
+      return data && data.topics ? data : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function saveCache(cache) {
+    try {
+      localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
+    } catch {
+      // Storage can be disabled or full; the current page still works.
+    }
+  }
+
+  const cache = readCache();
+  if (cache) {
+    renderAll(cache.topics, cache.updatedAt);
+    setStatus("저장된 기사 목록을 먼저 표시하고 최신 기사를 확인합니다. 마지막 전체 갱신: " +
+      formatDate(new Date(cache.updatedAt), { year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }) + " (KST)", "loading");
+  } else {
+    for (const topic of TOPICS) renderTopic(topic, [], true);
+    setStatus("최신 한국어 기사를 불러오고 있습니다…", "loading");
+  }
+
+  async function refreshNews() {
+    const existing = readCache();
+    refreshButton.disabled = true;
     refreshButton.textContent = "불러오는 중…";
     setStatus("최신 한국어 기사를 확인하고 있습니다…", "loading");
     const outcomes = await Promise.allSettled(TOPICS.map(loadTopic));
