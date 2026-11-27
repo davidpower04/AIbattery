@@ -89,6 +89,36 @@
     }
   }
 
+  const pageFallback = Object.fromEntries(TOPICS.map((topic) => {
+    const section = document.getElementById(topic.id);
+    const items = [...section.querySelectorAll(".card")].map((card) => {
+      const time = card.querySelector("time");
+      const day = time?.getAttribute("datetime") || new Date().toISOString().slice(0, 10);
+      return {
+        title: card.querySelector("h3")?.textContent.trim() || "",
+        link: safeLink(card.dataset.href || card.href),
+        date: day,
+        published: new Date(day + "T09:00:00+09:00").toISOString(),
+        summary: card.querySelector("p")?.textContent.trim() || "",
+        source: (card.querySelector(".source")?.textContent || "").replace(/^기사:\s*/, "").trim(),
+        isFallback: true
+      };
+    }).filter((item) => item.title && item.link && item.source);
+    return [topic.id, items];
+  }));
+
+  function fillToFour(current, saved, fallback) {
+    const items = [...current];
+    const seen = new Set(items.map((item) => item.title.toLocaleLowerCase("ko").replace(/[^\w가-힣]/g, "")));
+    for (const item of [...(saved || []), ...(fallback || [])]) {
+      const key = item.title.toLocaleLowerCase("ko").replace(/[^\w가-힣]/g, "");
+      if (!key || seen.has(key)) continue;
+      items.push({ ...item, isFallback: true });
+      seen.add(key);
+      if (items.length >= 4) break;
+    }
+    return items.slice(0, 4);
+  }
   function plainText(html) {
     const parsed = new DOMParser().parseFromString(html || "", "text/html");
     return (parsed.body.textContent || "").replace(/\s+/g, " ").trim();
@@ -149,18 +179,20 @@
       if (!item.summary) item.summary = "기사 제목을 눌러 매체 원문에서 자세한 내용을 확인하세요.";
       seen.add(key);
       unique.push(item);
-      if (unique.length === 4) break;
     }
-    return unique;
+    return unique.sort((a, b) => new Date(b.published) - new Date(a.published));
   }
 
   async function loadTopic(topic) {
-    const recent = selectStories(await fetchFeed(topic, "2d"));
-    if (recent.length >= 4) return { items: recent, window: "48시간" };
-    const week = selectStories(await fetchFeed(topic, "7d"));
-    return { items: week, window: "7일" };
+    const stories = selectStories(await fetchFeed(topic, "7d"));
+    const cutoff = Date.now() - 48 * 60 * 60 * 1000;
+    const recent = stories.filter((item) => new Date(item.published).getTime() >= cutoff);
+    const older = stories.filter((item) => new Date(item.published).getTime() < cutoff);
+    return {
+      items: [...recent, ...older].slice(0, 4),
+      window: recent.length >= 4 ? "48시간" : "7일"
+    };
   }
-
   function makeCard(item, topic) {
     const card = document.createElement("a");
     card.className = "card";
@@ -171,7 +203,7 @@
     meta.className = "cardmeta";
     const label = document.createElement("span");
     label.className = "label";
-    label.textContent = "주요 기사";
+    label.textContent = item.isFallback ? "이전 기사" : "주요 기사";
     const time = document.createElement("time");
     time.dateTime = item.published;
     time.textContent = formatDate(new Date(item.published), {
@@ -275,21 +307,23 @@
     outcomes.forEach((outcome, index) => {
       const topic = TOPICS[index];
       if (outcome.status === "fulfilled") {
-        next[topic.id] = outcome.value.items;
+        next[topic.id] = fillToFour(outcome.value.items, existing?.topics?.[topic.id], pageFallback[topic.id]);
+        if (outcome.value.items.length < 4 || next[topic.id].some((item) => item.isFallback)) failures.push(topic.label + " 기사 보충");
         windows.push(outcome.value.window);
       } else {
         allSucceeded = false;
         failures.push(topic.label);
-        next[topic.id] = existing?.topics?.[topic.id] || [];
+        const saved = existing?.topics?.[topic.id] || [];
+        next[topic.id] = fillToFour([], saved, pageFallback[topic.id]);
       }
     });
     const updatedAt = Date.now();
     renderAll(next, allSucceeded ? updatedAt : (existing?.updatedAt || null));
     if (allSucceeded) {
-      saveCache({ updatedAt, topics: next });
-      const fewer = TOPICS.filter((topic) => (next[topic.id] || []).length < 4).map((topic) => topic.label);
+      if (TOPICS.every((topic) => (next[topic.id] || []).length >= 4 && !(next[topic.id] || []).some((item) => item.isFallback))) saveCache({ updatedAt, topics: Object.fromEntries(TOPICS.map((topic) => [topic.id, next[topic.id]])) });
+      const fewer = TOPICS.filter((topic) => (next[topic.id] || []).some((item) => item.isFallback)).map((topic) => topic.label);
       if (fewer.length) {
-        setStatus("기사 목록을 갱신했습니다. " + fewer.join(", ") + " 주제는 최근 7일 내 한국어 기사 4건을 찾지 못했습니다.", "ready");
+        setStatus("최신 기사를 확인했습니다. 기사 수가 적거나 연결이 불안정한 주제에는 이전 기사를 보충해 4건씩 표시했습니다: " + fewer.join(", ") + ".", "ready");
       } else if (windows.includes("7일")) {
         setStatus("최신 기사 갱신 완료 · 일부 주제는 48시간 기사가 부족해 최근 7일 기사로 보충했습니다.", "ready");
       } else {
@@ -297,7 +331,7 @@
       }
     } else {
       if (existing) saveCache({ updatedAt: existing.updatedAt, topics: next });
-      setStatus("일부 뉴스 연결에 실패했습니다 (" + failures.join(", ") + "). 저장된 목록은 마지막 갱신 시각과 함께 표시합니다.", "error");
+      setStatus("일부 뉴스 연결에 실패했습니다 (" + failures.join(", ") + "). 이전 기사나 저장된 기사를 보충해 표시합니다. 기사 날짜를 확인해 주세요.", "error");
     }
     refreshButton.disabled = false;
     refreshButton.textContent = "지금 새로고침";
