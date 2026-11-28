@@ -49,7 +49,7 @@ function updateStories(){const q=search.value.trim().toLocaleLowerCase('ko');let
 filterButtons.forEach(button=>button.addEventListener('click',()=>{selectedTopic=button.dataset.filter;filterButtons.forEach(b=>b.setAttribute('aria-pressed',String(b===button)));updateStories()}));
 search.addEventListener('input',updateStories);document.addEventListener('briefing:updated',updateStories);
 cards.forEach(card=>{const url=card.dataset.href;card.addEventListener('click',()=>{window.location.href=url});card.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();window.location.href=url}})});
-</script><script src="news.js?v=return-refresh-20261127"></script></body></html>
+</script><script src="news.js?v=return-cache-20261129"></script></body></html>
 
 
 
