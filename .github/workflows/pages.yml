@@ -26,7 +26,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Collect previous KST day news
-        if: github.event_name != 'push'
         run: python scripts/update_briefing.py
       - name: Configure Pages
         uses: actions/configure-pages@v5
