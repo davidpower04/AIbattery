@@ -155,12 +155,19 @@
   }
 
   function readCachedBriefing(yesterday) {
-    try {
-      const cached = sessionStorage.getItem("morning-context-briefing:" + yesterday);
-      return cached ? normalizeBriefing(JSON.parse(cached), yesterday) : null;
-    } catch {
-      return null;
+    const candidates = [
+      ["localStorage", "morning-context-briefing"],
+      ["sessionStorage", "morning-context-briefing:" + yesterday]
+    ];
+    for (const [storageName, key] of candidates) {
+      try {
+        const cached = window[storageName].getItem(key);
+        if (cached) return normalizeBriefing(JSON.parse(cached), yesterday);
+      } catch {
+        // Try the next storage location when storage is disabled or stale.
+      }
     }
+    return null;
   }
 
   async function readBriefing(yesterday) {
@@ -182,10 +189,16 @@
     }
 
     const briefing = normalizeBriefing(payload, yesterday);
-    try {
-      sessionStorage.setItem("morning-context-briefing:" + yesterday, JSON.stringify(payload));
-    } catch {
-      // Storage can be unavailable in private browsing; live fetching still works.
+    const serialized = JSON.stringify(payload);
+    for (const [storageName, key] of [
+      ["localStorage", "morning-context-briefing"],
+      ["sessionStorage", "morning-context-briefing:" + yesterday]
+    ]) {
+      try {
+        window[storageName].setItem(key, serialized);
+      } catch {
+        // Keep the other storage location available as a fallback.
+      }
     }
     return briefing;
   }
@@ -277,6 +290,10 @@
   let retryTimer = null;
   let returnRefreshTimer = null;
 
+  function hasRenderedStories() {
+    return document.querySelector(".topic .cards .card") !== null;
+  }
+
   async function refreshNews({ force = false } = {}) {
     if (refreshInProgress) {
       if (force) refreshPending = true;
@@ -296,7 +313,11 @@
     refreshButton.disabled = true;
     refreshButton.textContent = "불러오는 중…";
     if (!cached) {
-      for (const topic of TOPICS) renderTopic(topic, [], true);
+      // Keep cards restored from the browser's back-forward cache visible while
+      // the network request is revalidated.
+      if (!hasRenderedStories()) {
+        for (const topic of TOPICS) renderTopic(topic, [], true);
+      }
       setStatus(formatDate(dateFromKey(yesterday), { year: "numeric", month: "long", day: "numeric" }) +
         " (KST) 전날 기사 자료를 확인하고 있습니다…", "loading");
     } else {
@@ -322,7 +343,7 @@
     } catch {
       if (cached) {
         renderAll(cached.topics, yesterday, cached.generatedAt, false);
-      } else {
+      } else if (!hasRenderedStories()) {
         renderAll({}, yesterday, null, false);
       }
 
